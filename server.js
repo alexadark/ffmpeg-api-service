@@ -59,7 +59,7 @@ app.get('/api/health', (req, res) => {
     status: ffmpegAvailable ? 'healthy' : 'degraded',
     ffmpeg: ffmpegAvailable ? 'available' : 'unavailable',
     ffmpegVersion,
-    version: '1.1.0',
+    version: '1.2.0',
     timestamp: new Date().toISOString()
   });
 });
@@ -316,7 +316,7 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`FFmpeg API Service v1.1.0 running on port ${PORT}`);
+  console.log(`FFmpeg API Service v1.2.0 running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
   console.log(`Download endpoint: /api/download/:filename`);
 });
