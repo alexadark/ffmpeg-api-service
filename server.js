@@ -3,12 +3,24 @@ require('dotenv').config();
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { assembleVideos } = require('./lib/ffmpeg');
+const { getFilePath, cleanupOldFiles } = require('./lib/storage');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // Store jobs for async processing
 const jobs = new Map();
+
+// Get base URL for download links
+function getBaseUrl(req) {
+  // Use environment variable if set, otherwise derive from request
+  if (process.env.BASE_URL) {
+    return process.env.BASE_URL;
+  }
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${protocol}://${host}`;
+}
 
 // API Key authentication middleware
 function authenticate(req, res, next) {
@@ -26,7 +38,7 @@ function authenticate(req, res, next) {
   next();
 }
 
-// Health check endpoint
+// Health check endpoint (no auth required)
 app.get('/api/health', (req, res) => {
   const { execSync } = require('child_process');
   let ffmpegAvailable = false;
@@ -47,9 +59,44 @@ app.get('/api/health', (req, res) => {
     status: ffmpegAvailable ? 'healthy' : 'degraded',
     ffmpeg: ffmpegAvailable ? 'available' : 'unavailable',
     ffmpegVersion,
-    version: '1.0.0',
+    version: '1.1.0',
     timestamp: new Date().toISOString()
   });
+});
+
+// Download endpoint - serve assembled videos (no auth for easy access from n8n)
+app.get('/api/download/:filename', async (req, res) => {
+  const { filename } = req.params;
+
+  try {
+    const filePath = await getFilePath(filename);
+
+    if (!filePath) {
+      return res.status(404).json({
+        error: 'File not found or expired'
+      });
+    }
+
+    // Set headers for video download
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    // Stream the file
+    const fs = require('fs');
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+
+    stream.on('error', (err) => {
+      console.error(`[Download] Stream error:`, err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to stream file' });
+      }
+    });
+
+  } catch (error) {
+    console.error(`[Download] Error:`, error.message);
+    res.status(500).json({ error: 'Download failed' });
+  }
 });
 
 // Video assembly endpoint
@@ -120,7 +167,7 @@ app.post('/api/assemble', authenticate, async (req, res) => {
       });
 
       // Start processing in background
-      processAsync(jobId, videos, transitionConfig, outputConfig, callbackUrl);
+      processAsync(jobId, videos, transitionConfig, outputConfig, callbackUrl, req);
 
       return res.json({
         success: true,
@@ -138,9 +185,15 @@ app.post('/api/assemble', authenticate, async (req, res) => {
     const processingTime = Date.now() - startTime;
     console.log(`[${new Date().toISOString()}] Assembly complete in ${processingTime}ms`);
 
+    // Build download URL
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${result.filename}`;
+
     res.json({
       success: true,
-      videoUrl: result.url,
+      videoUrl,
+      filename: result.filename,
+      size: result.size,
       duration: result.duration,
       processingTime
     });
@@ -156,7 +209,7 @@ app.post('/api/assemble', authenticate, async (req, res) => {
 });
 
 // Async processing function
-async function processAsync(jobId, videos, transition, output, callbackUrl) {
+async function processAsync(jobId, videos, transition, output, callbackUrl, req) {
   const axios = require('axios');
 
   try {
@@ -164,10 +217,15 @@ async function processAsync(jobId, videos, transition, output, callbackUrl) {
 
     const result = await assembleVideos(videos, transition, output);
 
+    // Build download URL
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${result.filename}`;
+
     jobs.set(jobId, {
       status: 'completed',
       progress: 100,
-      videoUrl: result.url,
+      videoUrl,
+      filename: result.filename,
       duration: result.duration,
       completedAt: new Date().toISOString()
     });
@@ -177,7 +235,8 @@ async function processAsync(jobId, videos, transition, output, callbackUrl) {
       await axios.post(callbackUrl, {
         jobId,
         status: 'completed',
-        videoUrl: result.url,
+        videoUrl,
+        filename: result.filename,
         duration: result.duration
       });
     }
@@ -236,6 +295,14 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000); // Run every 10 minutes
 
+// Clean up old video files periodically (keep for 2 hours)
+setInterval(() => {
+  cleanupOldFiles(2 * 60 * 60 * 1000);
+}, 30 * 60 * 1000); // Run every 30 minutes
+
+// Initial cleanup on startup
+cleanupOldFiles(2 * 60 * 60 * 1000);
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(`[${new Date().toISOString()}] Unhandled error:`, err);
@@ -249,6 +316,7 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`FFmpeg API Service running on port ${PORT}`);
+  console.log(`FFmpeg API Service v1.1.0 running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
+  console.log(`Download endpoint: /api/download/:filename`);
 });
