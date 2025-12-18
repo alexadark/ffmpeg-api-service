@@ -4,6 +4,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { assembleVideos } = require('./lib/ffmpeg');
 const { getFilePath, cleanupOldFiles } = require('./lib/storage');
+const { version } = require('./package.json');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -59,7 +60,7 @@ app.get('/api/health', (req, res) => {
     status: ffmpegAvailable ? 'healthy' : 'degraded',
     ffmpeg: ffmpegAvailable ? 'available' : 'unavailable',
     ffmpegVersion,
-    version: '1.3.0',
+    version,
     timestamp: new Date().toISOString()
   });
 });
