@@ -1,6 +1,6 @@
 {
   "name": "ffmpeg-api-service",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "description": "FFmpeg Video Assembly API Service with crossfade transitions",
   "main": "server.js",
   "scripts": {
