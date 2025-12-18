@@ -1,0 +1,35 @@
+# Dependencies (will be installed in container)
+node_modules/
+
+# Environment files (should be set via Docker env vars)
+.env
+.env.local
+.env.*.local
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+docs/
+
+# Development files
+docker-compose.yml
+.dockerignore
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
