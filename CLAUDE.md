@@ -99,3 +99,11 @@ Note: Supabase config in .env.example is legacy - current implementation uses lo
 - xfade offsets calculated based on cumulative durations minus transition overlaps
 - Audio sync achieved via `adelay` filter matching video xfade offsets (not acrossfade)
 - Temporary work directories created per job in `/tmp/ffmpeg-job-*`
+
+## Git Workflow
+
+When completing implementation tasks:
+1. **Commit after each phase/feature** - Use `git commit` to save work once a task is complete
+2. **Don't push immediately** - Leave pushing to remote (git push) for the user to do
+3. **Use descriptive commit messages** - Follow conventional commits (feat:, fix:, docs:, etc.)
+4. **Always commit before switching tasks** - Keep work tracked in git history
