@@ -1833,7 +1833,7 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`FFmpeg API Service v2.1.0 running on port ${PORT}`);
+  console.log(`FFmpeg API Service v2.1.1 running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
   console.log(`Phase 1-2: /api/assemble, /api/enhance-audio, /api/detect-silence, /api/trim, /api/extract-audio, /api/auto-edit`);
   console.log(`Phase 3: /api/crop, /api/add-subtitles`);
