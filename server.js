@@ -4,7 +4,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs').promises;
-const { assembleVideos, enhanceAudio, detectSilence, trimVideo, extractAudio, autoEditSegments, cropVideo, addSubtitles } = require('./lib/ffmpeg');
+const { assembleVideos, enhanceAudio, detectSilence, trimVideo, extractAudio, autoEditSegments, cropVideo, addSubtitles, applyColorGrade } = require('./lib/ffmpeg');
 const { getFilePath, cleanupOldFiles, downloadVideo, saveVideo } = require('./lib/storage');
 const { parseSRT, cleanSRT, isValidSRT } = require('./lib/subtitle-parser');
 const { version } = require('./package.json');
@@ -1051,6 +1051,111 @@ app.post('/api/add-subtitles', authenticate, async (req, res) => {
   }
 });
 
+// POST /api/color-grade - Apply color grading to video
+app.post('/api/color-grade', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, preset, intensity, lut, adjustments, output, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // Validate preset if provided
+    const validPresets = ['cinematic', 'vintage', 'cool', 'warm', 'vibrant', 'custom'];
+    const targetPreset = preset || 'cinematic';
+    if (!validPresets.includes(targetPreset)) {
+      return res.status(400).json({
+        error: `Invalid preset: ${preset}. Valid presets: ${validPresets.join(', ')}`
+      });
+    }
+
+    // Validate intensity if provided
+    const targetIntensity = intensity !== undefined ? parseFloat(intensity) : 1.0;
+    if (isNaN(targetIntensity) || targetIntensity < 0 || targetIntensity > 1.0) {
+      return res.status(400).json({
+        error: 'Invalid intensity: must be a number between 0.0 and 1.0'
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processColorGradeAsync(jobId, url, { preset: targetPreset, intensity: targetIntensity, lut, adjustments, output }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Video color grading started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting video color grading`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      const outputPath = path.join(workDir, 'color-graded.mp4');
+      const result = await applyColorGrade(inputPath, outputPath, targetPreset, targetIntensity, lut, adjustments);
+
+      // Save result
+      const fileName = `color-graded-${Date.now()}.mp4`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        videoUrl,
+        filename: savedFile.filename,
+        preset: result.preset,
+        intensity: result.intensity,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Color grading error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Color grading failed'
+    });
+  }
+});
+
 // Job status endpoint
 app.get('/api/job/:jobId', authenticate, (req, res) => {
   const { jobId } = req.params;
@@ -1622,6 +1727,79 @@ async function processSubtitlesAsync(jobId, url, srtContent, subtitleCount, opti
   }
 }
 
+// Async color grading processing
+async function processColorGradeAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    console.log(`[${new Date().toISOString()}] Async color grade job ${jobId}: Downloading video`);
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 40 });
+
+    const outputPath = path.join(workDir, 'color-graded.mp4');
+    console.log(`[${new Date().toISOString()}] Async color grade job ${jobId}: Applying color grade`);
+    const result = await applyColorGrade(inputPath, outputPath, options.preset, options.intensity, options.lut, options.adjustments);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 80 });
+
+    const fileName = `color-graded-${Date.now()}.mp4`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      videoUrl,
+      filename: savedFile.filename,
+      preset: result.preset,
+      intensity: result.intensity,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        videoUrl,
+        filename: savedFile.filename,
+        preset: result.preset,
+        intensity: result.intensity
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async color grade job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // Clean up old jobs periodically (keep for 1 hour)
 setInterval(() => {
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
@@ -1659,4 +1837,5 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/api/health`);
   console.log(`Phase 1-2: /api/assemble, /api/enhance-audio, /api/detect-silence, /api/trim, /api/extract-audio, /api/auto-edit`);
   console.log(`Phase 3: /api/crop, /api/add-subtitles`);
+  console.log(`Phase 4: /api/color-grade`);
 });
