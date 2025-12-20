@@ -107,3 +107,18 @@ When completing implementation tasks:
 2. **Don't push immediately** - Leave pushing to remote (git push) for the user to do
 3. **Use descriptive commit messages** - Follow conventional commits (feat:, fix:, docs:, etc.)
 4. **Always commit before switching tasks** - Keep work tracked in git history
+
+## Version Management
+
+**CRITICAL: Always update version in package.json when making code changes**
+
+Follow semantic versioning (MAJOR.MINOR.PATCH):
+- **PATCH** (2.1.3 → 2.1.4): Bug fixes, small tweaks, parameter corrections
+- **MINOR** (2.1.4 → 2.2.0): New features, new endpoints, backward-compatible changes
+- **MAJOR** (2.2.0 → 3.0.0): Breaking changes, API structure changes
+
+Workflow when making changes:
+1. Make code changes in relevant files
+2. Update `version` field in package.json
+3. Commit both changes together (or as separate commits)
+4. The version is displayed in `/api/health` endpoint for deployment tracking
