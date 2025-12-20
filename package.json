@@ -1,7 +1,7 @@
 {
   "name": "ffmpeg-api-service",
-  "version": "1.4.0",
-  "description": "FFmpeg Video Assembly API Service with crossfade transitions",
+  "version": "2.1.0",
+  "description": "FFmpeg Video Processing API - Assembly, Audio Enhancement, Silence Detection, Auto-Edit, Crop, Subtitles",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -13,7 +13,13 @@
     "api",
     "crossfade",
     "xfade",
-    "assembly"
+    "assembly",
+    "audio",
+    "silence-detection",
+    "auto-edit",
+    "crop",
+    "subtitles",
+    "shorts"
   ],
   "author": "",
   "license": "MIT",

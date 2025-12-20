@@ -110,9 +110,9 @@ Response: {
 
 ---
 
-## Phase 2 : Audio Analysis & Auto-Edit
+## Phase 2 : Audio Analysis & Auto-Edit ✅ COMPLETED
 
-### Task 2.1: POST /api/extract-audio
+### Task 2.1: POST /api/extract-audio ✅
 **Objectif** : Extraire l'audio au format MP3 pour envoyer à Whisper/transcription
 
 **Endpoint** :
@@ -142,7 +142,7 @@ ffmpeg -i input.mp4 -vn -acodec libmp3lame -ab 192k output.mp3
 
 ---
 
-### Task 2.2: POST /api/auto-edit (Hybrid: FFmpeg + Whisper + IA)
+### Task 2.2: POST /api/auto-edit (Hybrid: FFmpeg + Whisper + IA) ✅
 **Objectif** : Pipeline complet auto-edit (silences + filler words + assemblage)
 
 **Architecture** :
@@ -197,7 +197,7 @@ Response: {
 
 ---
 
-### Task 2.3: Filler Words List (Default Database)
+### Task 2.3: Filler Words List (Default Database) ✅
 **Fichier** : `lib/filler-words.js`
 
 ```javascript
@@ -218,9 +218,9 @@ module.exports = {
 
 ---
 
-## Phase 3 : Short-Form & Subtitles
+## Phase 3 : Short-Form & Subtitles ✅ COMPLETED
 
-### Task 3.1: POST /api/crop
+### Task 3.1: POST /api/crop ✅
 **Objectif** : Recadrage pour format vertical (9:16) et autres ratios
 
 **Endpoint** :
@@ -258,7 +258,7 @@ ffmpeg -i input.mp4 -vf "crop=ih*9/16:ih:(iw-ih*9/16)/2:0" output.mp4
 
 ---
 
-### Task 3.2: POST /api/add-subtitles
+### Task 3.2: POST /api/add-subtitles ✅
 **Objectif** : Incruster des sous-titres SRT stylisés
 
 **Endpoint** :
@@ -464,8 +464,11 @@ curl -X POST http://localhost:3000/api/enhance-audio \
 1. ✅ **Task 1.1** - enhance-audio (foundational)
 2. ✅ **Task 1.2** - detect-silence (enables Phase 2)
 3. ✅ **Task 1.3** - trim (building block)
-4. 📋 Task 2.1 - extract-audio (after Phase 1 done)
-5. 📋 Task 2.2 - filler word detection (n8n orchestration)
+4. ✅ **Task 2.1** - extract-audio (MP3/WAV/AAC extraction for Whisper)
+5. ✅ **Task 2.2** - auto-edit (silence removal + segment assembly)
+6. ✅ **Task 2.3** - filler words database (multi-language support)
+7. ✅ Task 3.1 - crop (aspect ratio conversion)
+8. ✅ Task 3.2 - add-subtitles (SRT/ASS styling)
 
 ---
 

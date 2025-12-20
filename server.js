@@ -4,8 +4,9 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs').promises;
-const { assembleVideos, enhanceAudio, detectSilence, trimVideo } = require('./lib/ffmpeg');
+const { assembleVideos, enhanceAudio, detectSilence, trimVideo, extractAudio, autoEditSegments, cropVideo, addSubtitles } = require('./lib/ffmpeg');
 const { getFilePath, cleanupOldFiles, downloadVideo, saveVideo } = require('./lib/storage');
+const { parseSRT, cleanSRT, isValidSRT } = require('./lib/subtitle-parser');
 const { version } = require('./package.json');
 
 const app = express();
@@ -527,6 +528,529 @@ app.post('/api/trim', authenticate, async (req, res) => {
   }
 });
 
+// Audio extraction endpoint
+app.post('/api/extract-audio', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, format, bitrate, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // Validate format if provided
+    const validFormats = ['mp3', 'wav', 'aac'];
+    const audioFormat = format || 'mp3';
+    if (!validFormats.includes(audioFormat.toLowerCase())) {
+      return res.status(400).json({
+        error: `Invalid format: ${format}. Valid formats: ${validFormats.join(', ')}`
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processAudioExtractionAsync(jobId, url, { format: audioFormat, bitrate }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Audio extraction started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting audio extraction`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      const outputExt = audioFormat.toLowerCase();
+      const outputPath = path.join(workDir, `audio.${outputExt}`);
+      const result = await extractAudio(inputPath, outputPath, { format: audioFormat, bitrate });
+
+      // Save result
+      const fileName = `audio-${Date.now()}.${outputExt}`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const audioUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        audioUrl,
+        filename: savedFile.filename,
+        duration: result.duration,
+        fileSize: result.fileSize,
+        format: audioFormat,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Audio extraction error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Audio extraction failed'
+    });
+  }
+});
+
+// Auto-edit endpoint (silence removal + segment assembly)
+app.post('/api/auto-edit', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, silenceThreshold, minSilenceDuration, segments, strategy, output, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processAutoEditAsync(jobId, url, { silenceThreshold, minSilenceDuration, segments, strategy, output }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Auto-edit started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting auto-edit`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      let segmentsToKeep = segments;
+
+      // If no segments provided, detect silences and create segments
+      if (!segmentsToKeep || segmentsToKeep.length === 0) {
+        const threshold = silenceThreshold || '-35dB';
+        const minDuration = minSilenceDuration || 0.5;
+
+        console.log(`[Auto-Edit] Detecting silences with threshold ${threshold}, min duration ${minDuration}s`);
+
+        const silenceResult = await require('./lib/ffmpeg').detectSilence(inputPath, {
+          threshold,
+          minDuration
+        });
+
+        // Convert silences to segments to KEEP (inverse of silences)
+        segmentsToKeep = silencesToSegments(silenceResult.silences, silenceResult.originalDuration, strategy);
+
+        if (segmentsToKeep.length === 0) {
+          return res.json({
+            success: true,
+            message: 'No edits needed - no significant silences detected',
+            originalDuration: silenceResult.originalDuration,
+            editedDuration: silenceResult.originalDuration,
+            timeRemoved: 0,
+            processingTime: Date.now() - startTime
+          });
+        }
+      }
+
+      const outputPath = path.join(workDir, 'auto-edited.mp4');
+      const result = await autoEditSegments(inputPath, outputPath, segmentsToKeep, output);
+
+      // Save result
+      const fileName = `auto-edited-${Date.now()}.mp4`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        videoUrl,
+        filename: savedFile.filename,
+        originalDuration: result.originalDuration,
+        editedDuration: result.editedDuration,
+        timeRemoved: result.timeRemoved,
+        stats: {
+          segmentsKept: segmentsToKeep.length,
+          totalCuts: segmentsToKeep.length - 1
+        },
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Auto-edit error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Auto-edit failed'
+    });
+  }
+});
+
+/**
+ * Convert silence segments to segments to KEEP
+ * @param {Array} silences - Array of silence objects {start, end, duration}
+ * @param {number} totalDuration - Total video duration
+ * @param {string} strategy - Edit strategy: light, normal, aggressive
+ * @returns {Array} Segments to keep [{start, end}, ...]
+ */
+function silencesToSegments(silences, totalDuration, strategy = 'normal') {
+  if (!silences || silences.length === 0) {
+    return [{ start: 0, end: totalDuration }];
+  }
+
+  // Strategy affects how much padding we keep around silences
+  let padBefore, padAfter;
+  switch (strategy) {
+    case 'aggressive':
+      padBefore = 0.05; // 50ms
+      padAfter = 0.05;
+      break;
+    case 'light':
+      padBefore = 0.2; // 200ms
+      padAfter = 0.3;
+      break;
+    case 'normal':
+    default:
+      padBefore = 0.1; // 100ms
+      padAfter = 0.15;
+      break;
+  }
+
+  const segments = [];
+  let currentStart = 0;
+
+  for (const silence of silences) {
+    // End the current segment at the start of silence (with padding)
+    const segmentEnd = Math.max(0, silence.start + padAfter);
+
+    if (segmentEnd > currentStart + 0.1) { // Only add segments > 100ms
+      segments.push({
+        start: currentStart,
+        end: segmentEnd
+      });
+    }
+
+    // Start next segment after the silence (with padding)
+    currentStart = Math.max(segmentEnd, silence.end - padBefore);
+  }
+
+  // Add final segment if there's content after the last silence
+  if (currentStart < totalDuration - 0.1) {
+    segments.push({
+      start: currentStart,
+      end: totalDuration
+    });
+  }
+
+  return segments;
+}
+
+// Video crop endpoint
+app.post('/api/crop', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, aspectRatio, position, zoom, output, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // Validate aspect ratio if provided
+    const validAspectRatios = ['9:16', '1:1', '16:9', '4:3'];
+    const targetRatio = aspectRatio || '9:16';
+    if (!validAspectRatios.includes(targetRatio)) {
+      return res.status(400).json({
+        error: `Invalid aspect ratio: ${aspectRatio}. Valid ratios: ${validAspectRatios.join(', ')}`
+      });
+    }
+
+    // Validate position if provided
+    const validPositions = ['center', 'top', 'bottom', 'left', 'right'];
+    const targetPosition = position || 'center';
+    if (!validPositions.includes(targetPosition)) {
+      return res.status(400).json({
+        error: `Invalid position: ${position}. Valid positions: ${validPositions.join(', ')}`
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processCropAsync(jobId, url, { aspectRatio: targetRatio, position: targetPosition, zoom, output }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Video crop started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting video crop`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      const outputPath = path.join(workDir, 'cropped.mp4');
+      const result = await cropVideo(inputPath, outputPath, { aspectRatio: targetRatio, position: targetPosition, zoom });
+
+      // Save result
+      const fileName = `cropped-${Date.now()}.mp4`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        videoUrl,
+        filename: savedFile.filename,
+        originalResolution: result.originalResolution,
+        croppedResolution: result.croppedResolution,
+        aspectRatio: result.aspectRatio,
+        position: result.position,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Crop error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Crop operation failed'
+    });
+  }
+});
+
+// Add subtitles endpoint
+app.post('/api/add-subtitles', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, subtitles, style, fontSize, position, fontColor, outlineColor, backgroundColor, output, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    if (!subtitles || typeof subtitles !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: subtitles (SRT content) is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // Validate SRT content
+    const cleanedSRT = cleanSRT(subtitles);
+    if (!isValidSRT(cleanedSRT)) {
+      return res.status(400).json({
+        error: 'Invalid subtitle format: must be valid SRT format'
+      });
+    }
+
+    // Parse and validate subtitles
+    let parsedSubs;
+    try {
+      parsedSubs = parseSRT(cleanedSRT);
+    } catch (parseError) {
+      return res.status(400).json({
+        error: `Subtitle parsing error: ${parseError.message}`
+      });
+    }
+
+    // Validate style if provided
+    const validStyles = ['bold-white', 'bold-yellow', 'minimal', 'custom'];
+    const targetStyle = style || 'bold-white';
+    if (!validStyles.includes(targetStyle)) {
+      return res.status(400).json({
+        error: `Invalid style: ${style}. Valid styles: ${validStyles.join(', ')}`
+      });
+    }
+
+    // Validate position if provided
+    const validPositions = ['bottom', 'top', 'center'];
+    const targetPosition = position || 'bottom';
+    if (!validPositions.includes(targetPosition)) {
+      return res.status(400).json({
+        error: `Invalid position: ${position}. Valid positions: ${validPositions.join(', ')}`
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processSubtitlesAsync(jobId, url, cleanedSRT, parsedSubs.count, { style: targetStyle, fontSize, position: targetPosition, fontColor, outlineColor, output }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Subtitle addition started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting subtitle addition`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      // Write SRT file
+      const srtPath = path.join(workDir, 'subtitles.srt');
+      await fs.writeFile(srtPath, cleanedSRT, 'utf8');
+
+      const outputPath = path.join(workDir, 'subtitled.mp4');
+      const result = await addSubtitles(inputPath, outputPath, srtPath, { style: targetStyle, fontSize, position: targetPosition, fontColor, outlineColor });
+
+      // Save result
+      const fileName = `subtitled-${Date.now()}.mp4`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        videoUrl,
+        filename: savedFile.filename,
+        subtitleCount: parsedSubs.count,
+        style: result.style,
+        position: result.position,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Subtitle addition error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Subtitle addition failed'
+    });
+  }
+});
+
 // Job status endpoint
 app.get('/api/job/:jobId', authenticate, (req, res) => {
   const { jobId } = req.params;
@@ -745,6 +1269,359 @@ async function processTrimAsync(jobId, url, options, callbackUrl, req) {
   }
 }
 
+// Async audio extraction processing
+async function processAudioExtractionAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 40 });
+
+    const outputExt = (options.format || 'mp3').toLowerCase();
+    const outputPath = path.join(workDir, `audio.${outputExt}`);
+    const result = await extractAudio(inputPath, outputPath, { format: options.format, bitrate: options.bitrate });
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 70 });
+
+    const fileName = `audio-${Date.now()}.${outputExt}`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const audioUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      audioUrl,
+      filename: savedFile.filename,
+      duration: result.duration,
+      fileSize: result.fileSize,
+      format: outputExt,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        audioUrl,
+        filename: savedFile.filename,
+        duration: result.duration,
+        fileSize: result.fileSize,
+        format: outputExt
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async audio extraction job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Async auto-edit processing
+async function processAutoEditAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 10 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 30 });
+
+    let segmentsToKeep = options.segments;
+
+    // If no segments provided, detect silences and create segments
+    if (!segmentsToKeep || segmentsToKeep.length === 0) {
+      const threshold = options.silenceThreshold || '-35dB';
+      const minDuration = options.minSilenceDuration || 0.5;
+
+      console.log(`[Auto-Edit Async] Detecting silences with threshold ${threshold}, min duration ${minDuration}s`);
+
+      const silenceResult = await require('./lib/ffmpeg').detectSilence(inputPath, {
+        threshold,
+        minDuration
+      });
+
+      jobs.set(jobId, { ...jobs.get(jobId), progress: 50 });
+
+      // Convert silences to segments to KEEP
+      segmentsToKeep = silencesToSegments(silenceResult.silences, silenceResult.originalDuration, options.strategy);
+
+      if (segmentsToKeep.length === 0) {
+        jobs.set(jobId, {
+          status: 'completed',
+          progress: 100,
+          message: 'No edits needed - no significant silences detected',
+          originalDuration: silenceResult.originalDuration,
+          editedDuration: silenceResult.originalDuration,
+          timeRemoved: 0,
+          completedAt: new Date().toISOString()
+        });
+
+        if (callbackUrl) {
+          await axios.post(callbackUrl, {
+            jobId,
+            status: 'completed',
+            message: 'No edits needed',
+            originalDuration: silenceResult.originalDuration,
+            timeRemoved: 0
+          });
+        }
+        return;
+      }
+    }
+
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 60 });
+
+    const outputPath = path.join(workDir, 'auto-edited.mp4');
+    const result = await autoEditSegments(inputPath, outputPath, segmentsToKeep, options.output);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 85 });
+
+    const fileName = `auto-edited-${Date.now()}.mp4`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      videoUrl,
+      filename: savedFile.filename,
+      originalDuration: result.originalDuration,
+      editedDuration: result.editedDuration,
+      timeRemoved: result.timeRemoved,
+      stats: {
+        segmentsKept: segmentsToKeep.length,
+        totalCuts: segmentsToKeep.length - 1
+      },
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        videoUrl,
+        filename: savedFile.filename,
+        originalDuration: result.originalDuration,
+        editedDuration: result.editedDuration,
+        timeRemoved: result.timeRemoved,
+        stats: {
+          segmentsKept: segmentsToKeep.length,
+          totalCuts: segmentsToKeep.length - 1
+        }
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async auto-edit job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Async crop processing
+async function processCropAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 40 });
+
+    const outputPath = path.join(workDir, 'cropped.mp4');
+    const result = await cropVideo(inputPath, outputPath, { aspectRatio: options.aspectRatio, position: options.position, zoom: options.zoom });
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 70 });
+
+    const fileName = `cropped-${Date.now()}.mp4`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      videoUrl,
+      filename: savedFile.filename,
+      originalResolution: result.originalResolution,
+      croppedResolution: result.croppedResolution,
+      aspectRatio: result.aspectRatio,
+      position: result.position,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        videoUrl,
+        filename: savedFile.filename,
+        originalResolution: result.originalResolution,
+        croppedResolution: result.croppedResolution,
+        aspectRatio: result.aspectRatio,
+        position: result.position
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async crop job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Async subtitles processing
+async function processSubtitlesAsync(jobId, url, srtContent, subtitleCount, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 40 });
+
+    // Write SRT file
+    const srtPath = path.join(workDir, 'subtitles.srt');
+    await fs.writeFile(srtPath, srtContent, 'utf8');
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 50 });
+
+    const outputPath = path.join(workDir, 'subtitled.mp4');
+    const result = await addSubtitles(inputPath, outputPath, srtPath, { style: options.style, fontSize: options.fontSize, position: options.position, fontColor: options.fontColor, outlineColor: options.outlineColor });
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 80 });
+
+    const fileName = `subtitled-${Date.now()}.mp4`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      videoUrl,
+      filename: savedFile.filename,
+      subtitleCount: subtitleCount,
+      style: result.style,
+      position: result.position,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        videoUrl,
+        filename: savedFile.filename,
+        subtitleCount: subtitleCount,
+        style: result.style,
+        position: result.position
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async subtitles job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // Clean up old jobs periodically (keep for 1 hour)
 setInterval(() => {
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
@@ -778,7 +1655,8 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`FFmpeg API Service v1.3.0 running on port ${PORT}`);
+  console.log(`FFmpeg API Service v2.1.0 running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
-  console.log(`Download endpoint: /api/download/:filename`);
+  console.log(`Phase 1-2: /api/assemble, /api/enhance-audio, /api/detect-silence, /api/trim, /api/extract-audio, /api/auto-edit`);
+  console.log(`Phase 3: /api/crop, /api/add-subtitles`);
 });
