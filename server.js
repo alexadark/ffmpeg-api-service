@@ -2,8 +2,10 @@ require('dotenv').config();
 
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { assembleVideos } = require('./lib/ffmpeg');
-const { getFilePath, cleanupOldFiles } = require('./lib/storage');
+const path = require('path');
+const fs = require('fs').promises;
+const { assembleVideos, enhanceAudio, detectSilence, trimVideo } = require('./lib/ffmpeg');
+const { getFilePath, cleanupOldFiles, downloadVideo, saveVideo } = require('./lib/storage');
 const { version } = require('./package.json');
 
 const app = express();
@@ -266,6 +268,265 @@ async function processAsync(jobId, videos, transition, output, callbackUrl, req)
   }
 }
 
+// Audio enhancement endpoint
+app.post('/api/enhance-audio', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, noiseFloor, voiceBoost, output, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processAudioEnhancementAsync(jobId, url, { noiseFloor, voiceBoost, output }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Audio enhancement started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting audio enhancement`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      const outputPath = path.join(workDir, 'enhanced.mp4');
+      const result = await enhanceAudio(inputPath, outputPath, { noiseFloor, voiceBoost });
+
+      // Save result
+      const fileName = `enhanced-audio-${Date.now()}.mp4`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        videoUrl,
+        filename: savedFile.filename,
+        audioStats: result.audioStats,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Audio enhancement error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Audio enhancement failed'
+    });
+  }
+});
+
+// Silence detection endpoint
+app.post('/api/detect-silence', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, threshold, minDuration, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processSilenceDetectionAsync(jobId, url, { threshold, minDuration }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Silence detection started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting silence detection`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      const result = await detectSilence(inputPath, { threshold, minDuration });
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        silences: result.silences,
+        totalSilenceDuration: result.totalSilenceDuration,
+        originalDuration: result.originalDuration,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Silence detection error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Silence detection failed'
+    });
+  }
+});
+
+// Video trim endpoint
+app.post('/api/trim', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, start, end, output, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    if (typeof start !== 'number' || typeof end !== 'number') {
+      return res.status(400).json({
+        error: 'Invalid request: start and end times are required (in seconds)'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processTrimAsync(jobId, url, { start, end, output }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Video trim started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting video trim`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      const outputPath = path.join(workDir, 'trimmed.mp4');
+      const result = await trimVideo(inputPath, outputPath, { start, end, useCopy: true });
+
+      // Save result
+      const fileName = `trimmed-${Date.now()}.mp4`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        videoUrl,
+        filename: savedFile.filename,
+        duration: result.duration,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Trim error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Trim operation failed'
+    });
+  }
+});
+
 // Job status endpoint
 app.get('/api/job/:jobId', authenticate, (req, res) => {
   const { jobId } = req.params;
@@ -283,6 +544,206 @@ app.get('/api/job/:jobId', authenticate, (req, res) => {
     ...job
   });
 });
+
+// Async audio enhancement processing
+async function processAudioEnhancementAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 40 });
+
+    const outputPath = path.join(workDir, 'enhanced.mp4');
+    const result = await enhanceAudio(inputPath, outputPath, { noiseFloor: options.noiseFloor, voiceBoost: options.voiceBoost });
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 70 });
+
+    const fileName = `enhanced-audio-${Date.now()}.mp4`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      videoUrl,
+      filename: savedFile.filename,
+      audioStats: result.audioStats,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        videoUrl,
+        filename: savedFile.filename,
+        audioStats: result.audioStats
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async audio enhancement job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Async silence detection processing
+async function processSilenceDetectionAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 50 });
+
+    const result = await detectSilence(inputPath, { threshold: options.threshold, minDuration: options.minDuration });
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 90 });
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      silences: result.silences,
+      totalSilenceDuration: result.totalSilenceDuration,
+      originalDuration: result.originalDuration,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        silences: result.silences,
+        totalSilenceDuration: result.totalSilenceDuration,
+        originalDuration: result.originalDuration
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async silence detection job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Async trim processing
+async function processTrimAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 40 });
+
+    const outputPath = path.join(workDir, 'trimmed.mp4');
+    const result = await trimVideo(inputPath, outputPath, { start: options.start, end: options.end, useCopy: true });
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 70 });
+
+    const fileName = `trimmed-${Date.now()}.mp4`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      videoUrl,
+      filename: savedFile.filename,
+      duration: result.duration,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        videoUrl,
+        filename: savedFile.filename,
+        duration: result.duration
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async trim job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
 
 // Clean up old jobs periodically (keep for 1 hour)
 setInterval(() => {
