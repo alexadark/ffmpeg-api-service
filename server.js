@@ -4,7 +4,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs').promises;
-const { assembleVideos, enhanceAudio, detectSilence, trimVideo, extractAudio, autoEditSegments, cropVideo, addSubtitles, applyColorGrade } = require('./lib/ffmpeg');
+const { assembleVideos, enhanceAudio, detectSilence, trimVideo, extractAudio, autoEditSegments, cropVideo, cropVideoSmart, addSubtitles, applyColorGrade } = require('./lib/ffmpeg');
 const { getFilePath, cleanupOldFiles, downloadVideo, saveVideo } = require('./lib/storage');
 const { parseSRT, cleanSRT, isValidSRT } = require('./lib/subtitle-parser');
 const { version } = require('./package.json');
@@ -916,6 +916,129 @@ app.post('/api/crop', authenticate, async (req, res) => {
   }
 });
 
+// Smart crop endpoint - optimized for screen recordings
+app.post('/api/crop-smart', authenticate, async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { url, mode, aspectRatio, letterbox, smartZoom, custom, output, callbackUrl } = req.body;
+
+    // Validate request
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request: url is required'
+      });
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      return res.status(400).json({
+        error: 'Invalid video URL'
+      });
+    }
+
+    // Validate mode
+    const validModes = ['letterbox', 'smart-zoom', 'custom'];
+    const targetMode = mode || 'letterbox';
+    if (!validModes.includes(targetMode)) {
+      return res.status(400).json({
+        error: `Invalid mode: ${mode}. Valid modes: ${validModes.join(', ')}`
+      });
+    }
+
+    // Validate aspect ratio if provided
+    const validAspectRatios = ['9:16', '1:1', '16:9', '4:3'];
+    const targetRatio = aspectRatio || '9:16';
+    if (!validAspectRatios.includes(targetRatio)) {
+      return res.status(400).json({
+        error: `Invalid aspect ratio: ${aspectRatio}. Valid ratios: ${validAspectRatios.join(', ')}`
+      });
+    }
+
+    // Validate smart-zoom parameters if mode is smart-zoom
+    if (targetMode === 'smart-zoom') {
+      if (!smartZoom || !smartZoom.x || !smartZoom.y || !smartZoom.width || !smartZoom.height) {
+        return res.status(400).json({
+          error: 'smart-zoom mode requires smartZoom object with x, y, width, and height'
+        });
+      }
+    }
+
+    // If callback URL provided, process async
+    if (callbackUrl) {
+      const jobId = uuidv4();
+
+      jobs.set(jobId, {
+        status: 'processing',
+        progress: 0,
+        createdAt: new Date().toISOString()
+      });
+
+      // Start processing in background
+      processCropSmartAsync(jobId, url, { mode: targetMode, aspectRatio: targetRatio, letterbox, smartZoom, custom, output }, callbackUrl, req);
+
+      return res.json({
+        success: true,
+        jobId,
+        status: 'processing',
+        message: 'Smart crop started. Results will be sent to callback URL.'
+      });
+    }
+
+    // Synchronous processing
+    console.log(`[${new Date().toISOString()}] Starting smart crop (mode: ${targetMode})`);
+
+    const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      const inputPath = path.join(workDir, 'input.mp4');
+      await downloadVideo(url, inputPath);
+
+      const outputPath = path.join(workDir, 'cropped-smart.mp4');
+      const result = await cropVideoSmart(inputPath, outputPath, {
+        mode: targetMode,
+        aspectRatio: targetRatio,
+        letterbox,
+        smartZoom,
+        custom
+      });
+
+      // Save result
+      const fileName = `smart-cropped-${Date.now()}.mp4`;
+      const savedFile = await saveVideo(outputPath, fileName);
+
+      const baseUrl = getBaseUrl(req);
+      const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+      const processingTime = Date.now() - startTime;
+
+      res.json({
+        success: true,
+        videoUrl,
+        filename: savedFile.filename,
+        mode: result.mode,
+        originalResolution: result.originalResolution,
+        outputResolution: result.outputResolution,
+        aspectRatio: result.aspectRatio,
+        processingTime
+      });
+
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Smart crop error:`, error.message);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Smart crop operation failed'
+    });
+  }
+});
+
 // Add subtitles endpoint
 app.post('/api/add-subtitles', authenticate, async (req, res) => {
   const startTime = Date.now();
@@ -1625,6 +1748,87 @@ async function processCropAsync(jobId, url, options, callbackUrl, req) {
 
   } catch (error) {
     console.error(`[${new Date().toISOString()}] Async crop job ${jobId} failed:`, error.message);
+
+    jobs.set(jobId, {
+      status: 'failed',
+      error: error.message,
+      failedAt: new Date().toISOString()
+    });
+
+    if (callbackUrl) {
+      try {
+        await axios.post(callbackUrl, {
+          jobId,
+          status: 'failed',
+          error: error.message
+        });
+      } catch (callbackError) {
+        console.error('Callback failed:', callbackError.message);
+      }
+    }
+
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Async smart crop processing
+async function processCropSmartAsync(jobId, url, options, callbackUrl, req) {
+  const axios = require('axios');
+  const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    jobs.set(jobId, { ...jobs.get(jobId), status: 'processing', progress: 20 });
+
+    const inputPath = path.join(workDir, 'input.mp4');
+    await downloadVideo(url, inputPath);
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 40 });
+
+    const outputPath = path.join(workDir, 'cropped-smart.mp4');
+    const result = await cropVideoSmart(inputPath, outputPath, {
+      mode: options.mode,
+      aspectRatio: options.aspectRatio,
+      letterbox: options.letterbox,
+      smartZoom: options.smartZoom,
+      custom: options.custom
+    });
+    jobs.set(jobId, { ...jobs.get(jobId), progress: 70 });
+
+    const fileName = `smart-cropped-${Date.now()}.mp4`;
+    const savedFile = await saveVideo(outputPath, fileName);
+
+    const baseUrl = getBaseUrl(req);
+    const videoUrl = `${baseUrl}/api/download/${savedFile.filename}`;
+
+    jobs.set(jobId, {
+      status: 'completed',
+      progress: 100,
+      videoUrl,
+      filename: savedFile.filename,
+      mode: result.mode,
+      originalResolution: result.originalResolution,
+      outputResolution: result.outputResolution,
+      aspectRatio: result.aspectRatio,
+      completedAt: new Date().toISOString()
+    });
+
+    // Send callback
+    if (callbackUrl) {
+      await axios.post(callbackUrl, {
+        jobId,
+        status: 'completed',
+        videoUrl,
+        filename: savedFile.filename,
+        mode: result.mode,
+        originalResolution: result.originalResolution,
+        outputResolution: result.outputResolution,
+        aspectRatio: result.aspectRatio
+      });
+    }
+
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Async smart crop job ${jobId} failed:`, error.message);
 
     jobs.set(jobId, {
       status: 'failed',
