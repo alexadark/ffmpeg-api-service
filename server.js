@@ -4,9 +4,9 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs').promises;
-const { assembleVideos, enhanceAudio, detectSilence, trimVideo, extractAudio, autoEditSegments, cropVideo, cropVideoSmart, addSubtitles, applyColorGrade } = require('./lib/ffmpeg');
+const { assembleVideos, enhanceAudio, detectSilence, trimVideo, extractAudio, autoEditSegments, cropVideo, cropVideoSmart, addSubtitles, addSubtitlesKaraoke, applyColorGrade } = require('./lib/ffmpeg');
 const { getFilePath, cleanupOldFiles, downloadVideo, saveVideo } = require('./lib/storage');
-const { parseSRT, cleanSRT, isValidSRT } = require('./lib/subtitle-parser');
+const { parseSRT, cleanSRT, isValidSRT, validateWords, generateKaraokeASS } = require('./lib/subtitle-parser');
 const { version } = require('./package.json');
 
 const app = express();
@@ -1044,18 +1044,27 @@ app.post('/api/add-subtitles', authenticate, async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { url, subtitles, style, fontSize, position, fontColor, outlineColor, backgroundColor, output, callbackUrl } = req.body;
+    const {
+      url,
+      subtitles,       // SRT mode: raw SRT string
+      words,           // Karaoke mode: array of {word, start, end}
+      style,           // SRT mode only
+      fontSize,
+      position,
+      fontColor,
+      outlineColor,
+      textColor,       // Karaoke mode: "white" or "black"
+      highlightColor,  // Karaoke mode: hex color for highlighted word
+      wordsPerGroup,   // Karaoke mode: words visible at once (default: 3)
+      backgroundColor,
+      output,
+      callbackUrl
+    } = req.body;
 
-    // Validate request
+    // Validate request - url always required
     if (!url || typeof url !== 'string') {
       return res.status(400).json({
         error: 'Invalid request: url is required'
-      });
-    }
-
-    if (!subtitles || typeof subtitles !== 'string') {
-      return res.status(400).json({
-        error: 'Invalid request: subtitles (SRT content) is required'
       });
     }
 
@@ -1067,44 +1076,66 @@ app.post('/api/add-subtitles', authenticate, async (req, res) => {
       });
     }
 
-    // Validate SRT content
-    const cleanedSRT = cleanSRT(subtitles);
-    if (!isValidSRT(cleanedSRT)) {
-      return res.status(400).json({
-        error: 'Invalid subtitle format: must be valid SRT format'
-      });
-    }
-
-    // Parse and validate subtitles
-    let parsedSubs;
-    try {
-      parsedSubs = parseSRT(cleanedSRT);
-    } catch (parseError) {
-      return res.status(400).json({
-        error: `Subtitle parsing error: ${parseError.message}`
-      });
-    }
-
-    // Validate style if provided
-    const validStyles = ['bold-white', 'bold-yellow', 'minimal', 'custom'];
-    const targetStyle = style || 'bold-white';
-    if (!validStyles.includes(targetStyle)) {
-      return res.status(400).json({
-        error: `Invalid style: ${style}. Valid styles: ${validStyles.join(', ')}`
-      });
-    }
+    // Determine mode: karaoke (words array) or standard (SRT)
+    const isKaraokeMode = Array.isArray(words) && words.length > 0;
 
     // Validate position if provided
     const validPositions = ['bottom', 'top', 'center'];
-    const targetPosition = position || 'bottom';
+    const targetPosition = position || (isKaraokeMode ? 'center' : 'bottom');
     if (!validPositions.includes(targetPosition)) {
       return res.status(400).json({
         error: `Invalid position: ${position}. Valid positions: ${validPositions.join(', ')}`
       });
     }
 
-    // If callback URL provided, process async
-    if (callbackUrl) {
+    let cleanedSRT = null;
+    let parsedSubs = null;
+    let wordsValidation = null;
+
+    if (isKaraokeMode) {
+      // Karaoke mode - validate words array
+      wordsValidation = validateWords(words);
+      if (!wordsValidation.valid) {
+        return res.status(400).json({
+          error: `Invalid words array: ${wordsValidation.error}`
+        });
+      }
+      console.log(`[${new Date().toISOString()}] Karaoke mode with ${wordsValidation.count} words`);
+    } else {
+      // SRT mode - validate subtitles string
+      if (!subtitles || typeof subtitles !== 'string') {
+        return res.status(400).json({
+          error: 'Invalid request: either "subtitles" (SRT string) or "words" (array) is required'
+        });
+      }
+
+      cleanedSRT = cleanSRT(subtitles);
+      if (!isValidSRT(cleanedSRT)) {
+        return res.status(400).json({
+          error: 'Invalid subtitle format: must be valid SRT format'
+        });
+      }
+
+      try {
+        parsedSubs = parseSRT(cleanedSRT);
+      } catch (parseError) {
+        return res.status(400).json({
+          error: `Subtitle parsing error: ${parseError.message}`
+        });
+      }
+
+      // Validate style for SRT mode
+      const validStyles = ['bold-white', 'bold-yellow', 'minimal', 'custom'];
+      const targetStyle = style || 'bold-white';
+      if (!validStyles.includes(targetStyle)) {
+        return res.status(400).json({
+          error: `Invalid style: ${style}. Valid styles: ${validStyles.join(', ')}`
+        });
+      }
+    }
+
+    // If callback URL provided, process async (TODO: add karaoke async support)
+    if (callbackUrl && !isKaraokeMode) {
       const jobId = uuidv4();
 
       jobs.set(jobId, {
@@ -1114,6 +1145,7 @@ app.post('/api/add-subtitles', authenticate, async (req, res) => {
       });
 
       // Start processing in background
+      const targetStyle = style || 'bold-white';
       processSubtitlesAsync(jobId, url, cleanedSRT, parsedSubs.count, { style: targetStyle, fontSize, position: targetPosition, fontColor, outlineColor, output }, callbackUrl, req);
 
       return res.json({
@@ -1125,7 +1157,7 @@ app.post('/api/add-subtitles', authenticate, async (req, res) => {
     }
 
     // Synchronous processing
-    console.log(`[${new Date().toISOString()}] Starting subtitle addition`);
+    console.log(`[${new Date().toISOString()}] Starting subtitle addition (${isKaraokeMode ? 'karaoke' : 'standard'} mode)`);
 
     const workDir = `/tmp/ffmpeg-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await fs.mkdir(workDir, { recursive: true });
@@ -1134,12 +1166,35 @@ app.post('/api/add-subtitles', authenticate, async (req, res) => {
       const inputPath = path.join(workDir, 'input.mp4');
       await downloadVideo(url, inputPath);
 
-      // Write SRT file
-      const srtPath = path.join(workDir, 'subtitles.srt');
-      await fs.writeFile(srtPath, cleanedSRT, 'utf8');
-
       const outputPath = path.join(workDir, 'subtitled.mp4');
-      const result = await addSubtitles(inputPath, outputPath, srtPath, { style: targetStyle, fontSize, position: targetPosition, fontColor, outlineColor });
+      let result;
+
+      if (isKaraokeMode) {
+        // Generate ASS file for karaoke
+        const assContent = generateKaraokeASS(words, {
+          textColor: textColor || 'white',
+          highlightColor: highlightColor || '00FF00',
+          fontSize: fontSize || 48,
+          position: targetPosition,
+          wordsPerGroup: wordsPerGroup || 3
+        });
+
+        const assPath = path.join(workDir, 'subtitles.ass');
+        await fs.writeFile(assPath, assContent, 'utf8');
+
+        result = await addSubtitlesKaraoke(inputPath, outputPath, assPath, {});
+        result.wordCount = wordsValidation.count;
+        result.textColor = textColor || 'white';
+        result.highlightColor = highlightColor || '00FF00';
+      } else {
+        // Standard SRT mode
+        const srtPath = path.join(workDir, 'subtitles.srt');
+        await fs.writeFile(srtPath, cleanedSRT, 'utf8');
+
+        const targetStyle = style || 'bold-white';
+        result = await addSubtitles(inputPath, outputPath, srtPath, { style: targetStyle, fontSize, position: targetPosition, fontColor, outlineColor });
+        result.subtitleCount = parsedSubs.count;
+      }
 
       // Save result
       const fileName = `subtitled-${Date.now()}.mp4`;
@@ -1150,15 +1205,26 @@ app.post('/api/add-subtitles', authenticate, async (req, res) => {
 
       const processingTime = Date.now() - startTime;
 
-      res.json({
+      // Build response based on mode
+      const response = {
         success: true,
         videoUrl,
         filename: savedFile.filename,
-        subtitleCount: parsedSubs.count,
-        style: result.style,
-        position: result.position,
+        mode: isKaraokeMode ? 'karaoke' : 'standard',
+        position: targetPosition,
         processingTime
-      });
+      };
+
+      if (isKaraokeMode) {
+        response.wordCount = result.wordCount;
+        response.textColor = result.textColor;
+        response.highlightColor = result.highlightColor;
+      } else {
+        response.subtitleCount = result.subtitleCount;
+        response.style = result.style;
+      }
+
+      res.json(response);
 
     } finally {
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
