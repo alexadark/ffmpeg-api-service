@@ -1,9 +1,14 @@
 FROM node:20-alpine
 
-# Install FFmpeg and required dependencies
+# Install FFmpeg, fonts (required for subtitles), and dependencies
 RUN apk add --no-cache \
     ffmpeg \
     ffmpeg-libs \
+    fontconfig \
+    ttf-freefont \
+    font-noto \
+    font-noto-emoji \
+    && fc-cache -f \
     && rm -rf /var/cache/apk/*
 
 # Create app directory
