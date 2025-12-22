@@ -746,7 +746,7 @@ app.post('/api/youtube-download', authenticate, async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { url, format, audioOnly, cookiesFile, callbackUrl } = req.body;
+    const { url, format, audioOnly, cookiesFile, cookies, callbackUrl } = req.body;
 
     // Validate request
     if (!url || typeof url !== 'string') {
@@ -782,7 +782,7 @@ app.post('/api/youtube-download', authenticate, async (req, res) => {
       });
 
       // Start processing in background
-      processYouTubeDownloadAsync(jobId, url, { format: targetFormat, audioOnly, cookiesFile }, callbackUrl, req);
+      processYouTubeDownloadAsync(jobId, url, { format: targetFormat, audioOnly, cookiesFile, cookies }, callbackUrl, req);
 
       return res.json({
         success: true,
@@ -803,7 +803,8 @@ app.post('/api/youtube-download', authenticate, async (req, res) => {
       const result = await downloadYouTube(url, workDir, {
         format: isAudioOnly ? 'best' : targetFormat,
         audioOnly: isAudioOnly,
-        cookiesFile
+        cookiesFile,
+        cookies
       });
 
       // Save result to output directory
@@ -1741,7 +1742,8 @@ async function processYouTubeDownloadAsync(jobId, url, options, callbackUrl, req
     const result = await downloadYouTube(url, workDir, {
       format: isAudioOnly ? 'best' : options.format,
       audioOnly: isAudioOnly,
-      cookiesFile: options.cookiesFile
+      cookiesFile: options.cookiesFile,
+      cookies: options.cookies
     });
     jobs.set(jobId, { ...jobs.get(jobId), progress: 70 });
 

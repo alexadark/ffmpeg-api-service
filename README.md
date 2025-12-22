@@ -614,7 +614,7 @@ Apply color grading presets to video.
 
 ## 11. YouTube Download
 
-Download videos from YouTube.
+Download videos from YouTube. Supports authentication via cookies for age-restricted or bot-detected content.
 
 ### `POST /api/youtube-download`
 
@@ -624,6 +624,7 @@ Download videos from YouTube.
   "url": "https://www.youtube.com/watch?v=VIDEO_ID",
   "format": "best",
   "audioOnly": false,
+  "cookies": "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t...",
   "callbackUrl": "https://your-webhook.com/callback"
 }
 ```
@@ -635,7 +636,10 @@ Download videos from YouTube.
 | `url` | string | Yes | - | YouTube video URL |
 | `format` | string | No | `"best"` | Quality: `best`, `1080p`, `720p`, `480p`, `360p` |
 | `audioOnly` | boolean | No | `false` | Extract audio only (MP3) |
+| `cookies` | string | No | - | Cookies in Netscape format (for auth/age-restricted) |
 | `callbackUrl` | string | No | - | Webhook URL for async processing |
+
+**Note:** If YouTube blocks the download with "Sign in to confirm you're not a bot", export cookies from your browser using a cookies.txt extension and pass the content in the `cookies` field.
 
 **Response:**
 ```json
