@@ -1,6 +1,6 @@
 FROM node:20-alpine
 
-# Install FFmpeg, fonts (required for subtitles), and dependencies
+# Install FFmpeg, fonts (required for subtitles), Python (for yt-dlp), and dependencies
 RUN apk add --no-cache \
     ffmpeg \
     ffmpeg-libs \
@@ -8,8 +8,21 @@ RUN apk add --no-cache \
     ttf-freefont \
     font-noto \
     font-noto-emoji \
-    && fc-cache -f \
+    curl \
+    unzip \
+    python3 \
+    py3-pip \
     && rm -rf /var/cache/apk/*
+
+# Install yt-dlp for YouTube download functionality
+RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
+
+# Download and install Montserrat font from Google Fonts
+RUN mkdir -p /usr/share/fonts/montserrat \
+    && curl -L "https://fonts.google.com/download?family=Montserrat" -o /tmp/montserrat.zip \
+    && unzip /tmp/montserrat.zip -d /usr/share/fonts/montserrat \
+    && rm /tmp/montserrat.zip \
+    && fc-cache -f
 
 # Create app directory
 WORKDIR /app

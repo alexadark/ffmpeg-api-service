@@ -41,11 +41,14 @@ Authorization: Bearer your-api-key
 | `/api/enhance-audio` | POST | Yes | Audio enhancement (noise reduction, voice clarity) |
 | `/api/detect-silence` | POST | Yes | Detect silence segments in video/audio |
 | `/api/trim` | POST | Yes | Trim/cut video segment |
+| `/api/trim-smart` | POST | Yes | Smart trim using silence detection |
 | `/api/extract-audio` | POST | Yes | Extract audio from video |
 | `/api/auto-edit` | POST | Yes | Auto-edit (silence removal + assembly) |
 | `/api/crop` | POST | Yes | Crop video to aspect ratio |
 | `/api/add-subtitles` | POST | Yes | Burn subtitles into video |
 | `/api/color-grade` | POST | Yes | Apply color grading presets |
+| `/api/youtube-download` | POST | Yes | Download YouTube video |
+| `/api/youtube-info` | POST | Yes | Get YouTube video metadata |
 | `/api/download/:filename` | GET | No | Download processed file |
 | `/api/job/:jobId` | GET | Yes | Check async job status |
 
@@ -63,7 +66,7 @@ Check API status and FFmpeg availability.
   "status": "healthy",
   "ffmpeg": "available",
   "ffmpegVersion": "6.0",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "timestamp": "2024-12-20T10:30:00.000Z"
 }
 ```
@@ -263,6 +266,56 @@ Cut a segment from a video.
 
 ---
 
+## 5b. Smart Trim
+
+Trim video with intelligent boundary detection using silence analysis. Automatically adjusts cut points to avoid cutting during speech.
+
+### `POST /api/trim-smart`
+
+**Request Body:**
+```json
+{
+  "url": "https://example.com/video.mp4",
+  "start": 10,
+  "end": 30,
+  "searchWindow": 2.0,
+  "silenceThreshold": "-35dB",
+  "callbackUrl": "https://your-webhook.com/callback"
+}
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `url` | string | Yes | - | Video URL to trim |
+| `start` | number | Yes | - | Approximate start time (seconds) |
+| `end` | number | Yes | - | Approximate end time (seconds) |
+| `searchWindow` | number | No | `2.0` | Search range for optimal cut points (seconds) |
+| `silenceThreshold` | string | No | `"-35dB"` | Silence detection threshold |
+| `callbackUrl` | string | No | - | Webhook URL for async processing |
+
+**Response:**
+```json
+{
+  "success": true,
+  "videoUrl": "https://your-domain.com/api/download/smart-trimmed-1705312200000.mp4",
+  "filename": "smart-trimmed-1705312200000.mp4",
+  "boundaries": {
+    "requestedStart": 10,
+    "requestedEnd": 30,
+    "actualStart": 9.8,
+    "actualEnd": 30.5,
+    "startAdjusted": true,
+    "endAdjusted": true
+  },
+  "duration": 20.7,
+  "processingTime": 3200
+}
+```
+
+---
+
 ## 6. Extract Audio
 
 Extract audio track from video.
@@ -406,11 +459,11 @@ Crop video to a specific aspect ratio.
 
 ## 9. Add Subtitles
 
-Burn SRT subtitles into video.
+Burn SRT subtitles into video. Supports standard sentence-level subtitles and word-level timing for dynamic effects.
 
 ### `POST /api/add-subtitles`
 
-**Request Body:**
+**Request Body (Standard):**
 ```json
 {
   "url": "https://example.com/video.mp4",
@@ -420,6 +473,30 @@ Burn SRT subtitles into video.
   "position": "bottom",
   "fontColor": "FFFFFF",
   "outlineColor": "000000",
+  "outlineWidth": 2,
+  "shadow": true,
+  "italic": false,
+  "bold": true,
+  "allCaps": false,
+  "backgroundColor": null,
+  "callbackUrl": "https://your-webhook.com/callback"
+}
+```
+
+**Request Body (Word-Level with Enhanced Styles):**
+```json
+{
+  "url": "https://example.com/video.mp4",
+  "words": [
+    { "word": "Hello", "start": 1.0, "end": 1.5 },
+    { "word": "world", "start": 1.5, "end": 2.0 }
+  ],
+  "style": "highlight",
+  "fontSize": 48,
+  "position": "center",
+  "baseColor": "FFFFFF",
+  "highlightColor": "FFFF00",
+  "wordsPerGroup": 3,
   "callbackUrl": "https://your-webhook.com/callback"
 }
 ```
@@ -429,22 +506,35 @@ Burn SRT subtitles into video.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `url` | string | Yes | - | Video URL |
-| `subtitles` | string | Yes | - | SRT content (raw string) |
+| `subtitles` | string | Cond. | - | SRT content (required if no `words`) |
+| `words` | array | Cond. | - | Word-level timing array (required if no `subtitles`) |
 | `style` | string | No | `"bold-white"` | Style preset (see below) |
 | `fontSize` | number | No | `24` | Font size in pixels |
 | `position` | string | No | `"bottom"` | Position: `bottom`, `top`, `center` |
-| `fontColor` | string | No | - | Custom font color (hex, for `custom` style) |
-| `outlineColor` | string | No | - | Custom outline color (hex, for `custom` style) |
+| `fontColor` | string | No | - | Custom font color (hex) |
+| `outlineColor` | string | No | `"000000"` | Outline color (hex) |
+| `outlineWidth` | number | No | `2` | Outline thickness (0-5) |
+| `shadow` | boolean | No | `true` | Enable drop shadow |
+| `italic` | boolean | No | `false` | Italic text |
+| `bold` | boolean | No | `true` | Bold text |
+| `allCaps` | boolean | No | `false` | Convert to uppercase |
+| `backgroundColor` | string | No | - | Background box color (hex) |
+| `baseColor` | string | No | `"FFFFFF"` | Base text color (word-level) |
+| `highlightColor` | string | No | `"FFFF00"` | Highlight color (word-level) |
+| `wordsPerGroup` | number | No | `3` | Words per display group (word-level) |
 | `callbackUrl` | string | No | - | Webhook URL for async processing |
 
 **Style Presets:**
 
-| Style | Font Color | Outline | Description |
-|-------|------------|---------|-------------|
-| `bold-white` | White | Black | Standard readable subtitles |
-| `bold-yellow` | Yellow | Black | High visibility |
-| `minimal` | White | None | Clean, no outline |
-| `custom` | Custom | Custom | Use `fontColor` and `outlineColor` |
+| Style | Type | Description |
+|-------|------|-------------|
+| `bold-white` | Standard | White text with black outline |
+| `bold-yellow` | Standard | Yellow text with black outline |
+| `minimal` | Standard | Clean white text, no outline |
+| `custom` | Standard | Use custom colors |
+| `highlight` | Word-level | Current word highlighted in different color |
+| `underline` | Word-level | Current word underlined |
+| `word_by_word` | Word-level | Show one word at a time |
 
 **Response:**
 ```json
@@ -522,7 +612,103 @@ Apply color grading presets to video.
 
 ---
 
-## 11. Download File
+## 11. YouTube Download
+
+Download videos from YouTube.
+
+### `POST /api/youtube-download`
+
+**Request Body:**
+```json
+{
+  "url": "https://www.youtube.com/watch?v=VIDEO_ID",
+  "format": "best",
+  "audioOnly": false,
+  "callbackUrl": "https://your-webhook.com/callback"
+}
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `url` | string | Yes | - | YouTube video URL |
+| `format` | string | No | `"best"` | Quality: `best`, `1080p`, `720p`, `480p`, `360p` |
+| `audioOnly` | boolean | No | `false` | Extract audio only (MP3) |
+| `callbackUrl` | string | No | - | Webhook URL for async processing |
+
+**Response:**
+```json
+{
+  "success": true,
+  "videoUrl": "https://your-domain.com/api/download/dQw4w9WgXcQ.mp4",
+  "filename": "dQw4w9WgXcQ.mp4",
+  "fileSize": 52428800,
+  "metadata": {
+    "id": "dQw4w9WgXcQ",
+    "title": "Video Title",
+    "duration": 212,
+    "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+    "channel": "Channel Name"
+  },
+  "processingTime": 15000
+}
+```
+
+---
+
+## 12. YouTube Info
+
+Get YouTube video metadata without downloading.
+
+### `POST /api/youtube-info`
+
+**Request Body:**
+```json
+{
+  "url": "https://www.youtube.com/watch?v=VIDEO_ID"
+}
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `url` | string | Yes | - | YouTube video URL |
+
+**Response:**
+```json
+{
+  "success": true,
+  "metadata": {
+    "id": "dQw4w9WgXcQ",
+    "title": "Video Title",
+    "description": "Video description...",
+    "duration": 212,
+    "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+    "channel": "Channel Name",
+    "channelId": "UCuAXFkgsw1L7xaCfnd5JJOw",
+    "uploadDate": "20091025",
+    "viewCount": 1500000000,
+    "likeCount": 15000000,
+    "formats": [
+      {
+        "formatId": "137",
+        "ext": "mp4",
+        "resolution": "1920x1080",
+        "fps": 30,
+        "vcodec": "avc1",
+        "acodec": "none",
+        "filesize": 52428800
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 13. Download File
 
 Download a processed file.
 
@@ -546,7 +732,7 @@ GET /api/download/assembled-1705312200000.mp4
 
 ---
 
-## 12. Job Status
+## 14. Job Status
 
 Check the status of an async job.
 
