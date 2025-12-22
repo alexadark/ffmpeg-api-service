@@ -1,6 +1,6 @@
 {
   "name": "ffmpeg-api-service",
-  "version": "2.1.6",
+  "version": "2.2.0",
   "description": "FFmpeg Video Processing API - Assembly, Audio Enhancement, Silence Detection, Auto-Edit, Crop, Subtitles",
   "main": "server.js",
   "scripts": {
@@ -28,6 +28,7 @@
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "uuid": "^11.0.3"
+    "uuid": "^11.0.3",
+    "youtube-dl-exec": "^3.0.0"
   }
 }
