@@ -17,11 +17,12 @@ RUN apk add --no-cache \
 # Install yt-dlp for YouTube download functionality
 RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
 
-# Download and install Montserrat font from Google Fonts
+# Download and install Montserrat font from GitHub releases
 RUN mkdir -p /usr/share/fonts/montserrat \
-    && curl -L "https://fonts.google.com/download?family=Montserrat" -o /tmp/montserrat.zip \
-    && unzip /tmp/montserrat.zip -d /usr/share/fonts/montserrat \
-    && rm /tmp/montserrat.zip \
+    && curl -L "https://github.com/JulietaUla/Montserrat/releases/download/v7.222/Montserrat-v7.222.zip" -o /tmp/montserrat.zip \
+    && unzip /tmp/montserrat.zip -d /tmp/montserrat-extracted \
+    && cp /tmp/montserrat-extracted/fonts/ttf/*.ttf /usr/share/fonts/montserrat/ \
+    && rm -rf /tmp/montserrat.zip /tmp/montserrat-extracted \
     && fc-cache -f
 
 # Create app directory
