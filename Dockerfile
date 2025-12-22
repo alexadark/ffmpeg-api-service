@@ -17,13 +17,14 @@ RUN apk add --no-cache \
 # Install yt-dlp for YouTube download functionality
 RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
 
-# Download and install Montserrat font from GitHub releases
+# Download Montserrat font (optional - falls back to Noto if unavailable)
 RUN mkdir -p /usr/share/fonts/montserrat \
-    && curl -L "https://github.com/JulietaUla/Montserrat/releases/download/v7.222/Montserrat-v7.222.zip" -o /tmp/montserrat.zip \
-    && unzip /tmp/montserrat.zip -d /tmp/montserrat-extracted \
-    && cp /tmp/montserrat-extracted/fonts/ttf/*.ttf /usr/share/fonts/montserrat/ \
-    && rm -rf /tmp/montserrat.zip /tmp/montserrat-extracted \
-    && fc-cache -f
+    && (curl -fsSL "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-ExtraBold.ttf" \
+        -o /usr/share/fonts/montserrat/Montserrat-ExtraBold.ttf \
+        && curl -fsSL "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Bold.ttf" \
+        -o /usr/share/fonts/montserrat/Montserrat-Bold.ttf \
+        && fc-cache -f \
+        || echo "Montserrat download failed, using fallback fonts")
 
 # Create app directory
 WORKDIR /app
