@@ -1,6 +1,6 @@
 {
   "name": "ffmpeg-api-service",
-  "version": "2.2.7",
+  "version": "2.2.8",
   "description": "FFmpeg Video Processing API - Assembly, Audio Enhancement, Silence Detection, Auto-Edit, Crop, Subtitles",
   "main": "server.js",
   "scripts": {

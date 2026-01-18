@@ -14,8 +14,9 @@ RUN apk add --no-cache \
     py3-pip \
     && rm -rf /var/cache/apk/*
 
-# Install yt-dlp for YouTube download functionality
-RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
+# Install yt-dlp nightly for YouTube download functionality
+# Using nightly builds for latest YouTube compatibility fixes
+RUN pip3 install --no-cache-dir --break-system-packages --pre yt-dlp
 
 # Download Montserrat font (optional - falls back to Noto if unavailable)
 RUN mkdir -p /usr/share/fonts/montserrat \
